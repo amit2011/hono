@@ -74,6 +74,10 @@
     	<groupId>org.eclipse.hono</groupId>
     	<artifactId>hono-legal</artifactId>
     </dependency>
+    <dependency>
+      <groupId>io.vertx</groupId>
+      <artifactId>vertx-mysql-postgresql-client</artifactId>
+    </dependency>
   </dependencies>
 
   <build>

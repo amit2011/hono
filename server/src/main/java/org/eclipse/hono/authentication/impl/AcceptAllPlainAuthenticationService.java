@@ -22,7 +22,7 @@ import io.vertx.core.Handler;
  * A PLAIN SASL authenticator that accepts all credentials.
  */
 @Component
-@Profile("!sql-auth")
+@Profile("!authentication-sql")
 public final class AcceptAllPlainAuthenticationService extends AbstractPlainAuthenticationService {
 
     @Override
