@@ -49,6 +49,7 @@ public final class RegistrationConstants {
     public static final String APP_PROPERTY_STATUS               = "status";
     public static final String FIELD_PAYLOAD                     = "payload";
 
+
     public static final String REGISTRATION_ENDPOINT             = "registration";
     public static final String PATH_SEPARATOR                    = "/";
     public static final String NODE_ADDRESS_REGISTRATION_PREFIX  = REGISTRATION_ENDPOINT + PATH_SEPARATOR;
