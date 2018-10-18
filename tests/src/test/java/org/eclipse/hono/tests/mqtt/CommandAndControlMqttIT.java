@@ -76,31 +76,108 @@ public class CommandAndControlMqttIT extends MqttTestBase {
         return helper.honoClient.createEventConsumer(tenantId, messageConsumer, remoteClose -> {});
     }
 
-    private Future<Void> subscribeToCommands(final Handler<MqttPublishMessage> msgHandler) {
+    private Future<Void> subscribeToCommands(final Handler<MqttPublishMessage> msgHandler, final MqttQoS qos) {
         final Future<Void> result = Future.future();
         context.runOnContext(go -> {
             mqttClient.publishHandler(msgHandler);
             mqttClient.subscribeCompletionHandler(subAckMsg -> {
-                if (subAckMsg.grantedQoSLevels().contains(0)) {
+                if (subAckMsg.grantedQoSLevels().contains(qos.value())) {
                     result.complete();
                 } else {
                     result.fail("could not subscribe to command topic");
                 }
             });
-            mqttClient.subscribe("control/+/+/req/#", 0);
+            mqttClient.subscribe("control/+/+/req/#", qos.value());
         });
         return result;
     }
 
     /**
-     * Verifies that the adapter forwards commands and response hence and forth between
-     * an application and a device.
+     * Verifies that the adapter forwards commands with Qos as 0 and response hence and forth between an application and a device.
      * 
      * @param ctx The vert.x test context.
      * @throws InterruptedException if not all commands and responses are exchanged in time.
      */
     @Test
-    public void testSendCommandSucceeds(final TestContext ctx) throws InterruptedException {
+    public void testSendCommandSucceedsWithQos0(final TestContext ctx) throws InterruptedException {
+        testSendCommandSucceeds(ctx, MqttQoS.AT_MOST_ONCE);
+    }
+
+    /**
+     * Verifies that the adapter forwards commands with Qos as 1 and response hence and forth between an application and a device.
+     *
+     * @param ctx The vert.x test context.
+     * @throws InterruptedException if not all commands and responses are exchanged in time.
+     */
+    @Test
+    public void testSendCommandSucceedsWithQos1(final TestContext ctx) throws InterruptedException {
+        testSendCommandSucceeds(ctx, MqttQoS.AT_LEAST_ONCE);
+    }
+
+    /**
+     * Verifies that the adapter rejects malformed command messages sent by applications.
+     * 
+     * @param ctx The vert.x test context.
+     * @throws InterruptedException if not all commands and responses are exchanged in time.
+     */
+    @Test
+    public void testSendCommandFailsForMalformedMessage(final TestContext ctx) throws InterruptedException {
+
+        final Async setup = ctx.async();
+        final Async notificationReceived = ctx.async();
+
+        connectToAdapter(tenant, deviceId, password, () -> createConsumer(tenantId, msg -> {
+            // expect empty notification with TTD -1
+            ctx.assertEquals(EventConstants.CONTENT_TYPE_EMPTY_NOTIFICATION, msg.getContentType());
+            final TimeUntilDisconnectNotification notification = TimeUntilDisconnectNotification.fromMessage(msg).orElse(null);
+            LOGGER.info("received notification [{}]", notification);
+            ctx.assertNotNull(notification);
+            if (notification.getTtd() == -1) {
+                notificationReceived.complete();
+            }
+        })).compose(conAck -> subscribeToCommands(msg -> {
+            ctx.fail("should not have received command");
+        }, MqttQoS.AT_MOST_ONCE)).setHandler(ctx.asyncAssertSuccess(ok -> setup.complete()));
+        setup.await();
+        notificationReceived.await();
+
+        final AtomicReference<GenericMessageSender> sender = new AtomicReference<>();
+        final Async senderCreation = ctx.async();
+        final String commandTopic = String.format(COMMAND_TOPIC_TEMPLATE, tenantId, deviceId);
+
+        helper.honoClient.createGenericMessageSender(commandTopic).map(s -> {
+            sender.set(s);
+            senderCreation.complete();
+            return s;
+        });
+        senderCreation.await(2000);
+
+        // send a message without subject
+        final Message messageWithoutSubject = ProtonHelper.message("input data");
+        messageWithoutSubject.setMessageId("message-id");
+        messageWithoutSubject.setReplyTo("reply/to/address");
+        sender.get().sendAndWaitForOutcome(messageWithoutSubject).setHandler(ctx.asyncAssertFailure(t -> {
+            ctx.assertTrue(t instanceof ClientErrorException);
+        }));
+
+        // send a message without message and correlation ID
+        final Message messageWithoutId = ProtonHelper.message("input data");
+        messageWithoutId.setSubject("setValue");
+        messageWithoutId.setReplyTo("reply/to/address");
+        sender.get().sendAndWaitForOutcome(messageWithoutId).setHandler(ctx.asyncAssertFailure(t -> {
+            ctx.assertTrue(t instanceof ClientErrorException);
+        }));
+
+        // send a message without reply-to address
+        final Message messageWithoutReplyTo = ProtonHelper.message("input data");
+        messageWithoutReplyTo.setSubject("setValue");
+        messageWithoutReplyTo.setMessageId("message-id");
+        sender.get().sendAndWaitForOutcome(messageWithoutReplyTo).setHandler(ctx.asyncAssertFailure(t -> {
+            ctx.assertTrue(t instanceof ClientErrorException);
+        }));
+    }
+
+    private void testSendCommandSucceeds(final TestContext ctx, final MqttQoS qos) throws InterruptedException {
 
         final Async setup = ctx.async();
         final Async notificationReceived = ctx.async();
@@ -124,6 +201,7 @@ public class CommandAndControlMqttIT extends MqttTestBase {
                 // send response
                 final String responseTopic = String.format(COMMAND_RESPONSE_TOPIC_TEMPLATE, commandRequestId, HttpURLConnection.HTTP_OK);
                 LOGGER.trace("publishing response [topic: {}]", responseTopic);
+                ctx.assertEquals(msg.qosLevel(), qos);
                 mqttClient.publish(
                         responseTopic,
                         Buffer.buffer(command + ": ok"),
@@ -131,7 +209,7 @@ public class CommandAndControlMqttIT extends MqttTestBase {
                         false,
                         false);
             }
-        })).setHandler(ctx.asyncAssertSuccess(ok -> setup.complete()));
+        }, qos)).setHandler(ctx.asyncAssertSuccess(ok -> setup.complete()));
         setup.await();
         notificationReceived.await();
 
@@ -175,68 +253,5 @@ public class CommandAndControlMqttIT extends MqttTestBase {
         if (messagesReceived != commandsSent.get()) {
             ctx.fail("did not receive a response for each command sent");
         }
-    }
-
-    /**
-     * Verifies that the adapter rejects malformed command messages sent by applications.
-     * 
-     * @param ctx The vert.x test context.
-     * @throws InterruptedException if not all commands and responses are exchanged in time.
-     */
-    @Test
-    public void testSendCommandFailsForMalformedMessage(final TestContext ctx) throws InterruptedException {
-
-        final Async setup = ctx.async();
-        final Async notificationReceived = ctx.async();
-
-        connectToAdapter(tenant, deviceId, password, () -> createConsumer(tenantId, msg -> {
-            // expect empty notification with TTD -1
-            ctx.assertEquals(EventConstants.CONTENT_TYPE_EMPTY_NOTIFICATION, msg.getContentType());
-            final TimeUntilDisconnectNotification notification = TimeUntilDisconnectNotification.fromMessage(msg).orElse(null);
-            LOGGER.info("received notification [{}]", notification);
-            ctx.assertNotNull(notification);
-            if (notification.getTtd() == -1) {
-                notificationReceived.complete();
-            }
-        })).compose(conAck -> subscribeToCommands(msg -> {
-            ctx.fail("should not have received command");
-        })).setHandler(ctx.asyncAssertSuccess(ok -> setup.complete()));
-        setup.await();
-        notificationReceived.await();
-
-        final AtomicReference<GenericMessageSender> sender = new AtomicReference<>();
-        final Async senderCreation = ctx.async();
-        final String commandTopic = String.format(COMMAND_TOPIC_TEMPLATE, tenantId, deviceId);
-
-        helper.honoClient.createGenericMessageSender(commandTopic).map(s -> {
-            sender.set(s);
-            senderCreation.complete();
-            return s;
-        });
-        senderCreation.await(2000);
-
-        // send a message without subject
-        final Message messageWithoutSubject = ProtonHelper.message("input data");
-        messageWithoutSubject.setMessageId("message-id");
-        messageWithoutSubject.setReplyTo("reply/to/address");
-        sender.get().sendAndWaitForOutcome(messageWithoutSubject).setHandler(ctx.asyncAssertFailure(t -> {
-            ctx.assertTrue(t instanceof ClientErrorException);
-        }));
-
-        // send a message without message and correlation ID
-        final Message messageWithoutId = ProtonHelper.message("input data");
-        messageWithoutId.setSubject("setValue");
-        messageWithoutId.setReplyTo("reply/to/address");
-        sender.get().sendAndWaitForOutcome(messageWithoutId).setHandler(ctx.asyncAssertFailure(t -> {
-            ctx.assertTrue(t instanceof ClientErrorException);
-        }));
-
-        // send a message without reply-to address
-        final Message messageWithoutReplyTo = ProtonHelper.message("input data");
-        messageWithoutReplyTo.setSubject("setValue");
-        messageWithoutReplyTo.setMessageId("message-id");
-        sender.get().sendAndWaitForOutcome(messageWithoutReplyTo).setHandler(ctx.asyncAssertFailure(t -> {
-            ctx.assertTrue(t instanceof ClientErrorException);
-        }));
     }
 }

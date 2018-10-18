@@ -4,6 +4,10 @@ title = "Release Notes"
 
 ## 0.8 (not released yet)
 
+### Fixes & Enhancements
+
+* MQTT adapter now supports commands to be published using QoS 1.
+
 ### API Changes
 
 * The `hono-client` module now contains all classes necessary to implement Command and Control in protocol adapters.

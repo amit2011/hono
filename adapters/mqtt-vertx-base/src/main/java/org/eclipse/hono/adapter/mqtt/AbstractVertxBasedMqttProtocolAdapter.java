@@ -16,12 +16,14 @@ package org.eclipse.hono.adapter.mqtt;
 import java.net.HttpURLConnection;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+import io.vertx.mqtt.MqttTopicSubscription;
 import org.apache.qpid.proton.amqp.transport.ErrorCondition;
 import org.apache.qpid.proton.message.Message;
 import org.eclipse.hono.client.ClientErrorException;
@@ -522,7 +524,7 @@ public abstract class AbstractVertxBasedMqttProtocolAdapter<T extends ProtocolAd
             final MqttSubscribeMessage subscribeMsg) {
 
         final Map<String, Future> topicFilters = new HashMap<>();
-        final List<Future> subscriptionOutcome = new ArrayList<>(subscribeMsg.topicSubscriptions().size());
+        final Map<MqttTopicSubscription, Future> subscriptionOutcome = new LinkedHashMap<>(subscribeMsg.topicSubscriptions().size());
 
         final Span span = tracer.buildSpan("SUBSCRIBE")
                 .ignoreActiveSpan()
@@ -545,7 +547,7 @@ public abstract class AbstractVertxBasedMqttProtocolAdapter<T extends ProtocolAd
                 // make sure that we process multiple filters as if they had been
                 // submitted using multiple separate SUBSCRIBE packets
                 // we therefore always return the same result for duplicate topic filters
-                subscriptionOutcome.add(result);
+                subscriptionOutcome.put(subscription, result);
             } else {
 
                 // we currently only support subscriptions for receiving commands
@@ -556,7 +558,7 @@ public abstract class AbstractVertxBasedMqttProtocolAdapter<T extends ProtocolAd
                             subscription.topicName(), subscription.qualityOfService());
                     result = Future.failedFuture(new IllegalArgumentException("unsupported topic filter"));
                 } else {
-                    result = createCommandConsumer(endpoint, cmdSub).map(consumer -> {
+                    result = createCommandConsumer(endpoint, subscription.qualityOfService(), cmdSub).map(consumer -> {
                         // make sure that we close the consumer and notify downstream
                         // applications when the connection is closed
                         endpoint.closeHandler(c -> {
@@ -564,11 +566,14 @@ public abstract class AbstractVertxBasedMqttProtocolAdapter<T extends ProtocolAd
                             closeCommandConsumer(cmdSub.getTenant(), cmdSub.getDeviceId());
                             close(endpoint, authenticatedDevice);
                         });
-                        span.log(String.format("accepting subscription [filter: %s, requested QoS: %s, granted QoS: %s]",
-                                subscription.topicName(), subscription.qualityOfService(), MqttQoS.AT_MOST_ONCE));
-                        LOG.debug("created subscription [tenant: {}, device: {}, filter: {}, requested QoS: {}, granted QoS: {}]",
+                        span.log(
+                                String.format("accepting subscription [filter: %s, requested QoS: %s, granted QoS: %s]",
+                                        subscription.topicName(), subscription.qualityOfService(),
+                                        subscription.qualityOfService()));
+                        LOG.debug(
+                                "created subscription [tenant: {}, device: {}, filter: {}, requested QoS: {}, granted QoS: {}]",
                                 cmdSub.getTenant(), cmdSub.getDeviceId(), subscription.topicName(),
-                                subscription.qualityOfService(), MqttQoS.AT_MOST_ONCE);
+                                subscription.qualityOfService(), subscription.qualityOfService());
                         return cmdSub;
                     }).recover(t -> {
                         TracingHelper.logError(span, String.format("error creating subscription [filter: %s, requested QoS: %s]: %s",
@@ -580,16 +585,17 @@ public abstract class AbstractVertxBasedMqttProtocolAdapter<T extends ProtocolAd
                     });
                 }
                 topicFilters.put(subscription.topicName(), result);
-                subscriptionOutcome.add(result);
+                subscriptionOutcome.put(subscription, result);
             }
         });
 
         // wait for all futures to complete before sending SUBACK
-        CompositeFuture.join(subscriptionOutcome).setHandler(v -> {
+        CompositeFuture.join(new ArrayList<>(subscriptionOutcome.values())).setHandler(v -> {
 
             // return a status code for each topic filter contained in the SUBSCRIBE packet
-            final List<MqttQoS> grantedQosLevels = subscriptionOutcome.stream()
-                    .map(f -> f.failed() ? MqttQoS.FAILURE : MqttQoS.AT_MOST_ONCE)
+            final List<MqttQoS> grantedQosLevels = subscriptionOutcome.entrySet().stream()
+                    .map(subscriptionOutcomeEntry -> subscriptionOutcomeEntry.getValue().failed() ? MqttQoS.FAILURE
+                            : subscriptionOutcomeEntry.getKey().qualityOfService())
                     .collect(Collectors.toList());
 
             if (endpoint.isConnected()) {
@@ -661,7 +667,7 @@ public abstract class AbstractVertxBasedMqttProtocolAdapter<T extends ProtocolAd
         span.finish();
     }
 
-    private Future<MessageConsumer> createCommandConsumer(final MqttEndpoint mqttEndpoint, final CommandSubscription sub) {
+    private Future<MessageConsumer> createCommandConsumer(final MqttEndpoint mqttEndpoint, final MqttQoS qos, final CommandSubscription sub) {
 
         final AtomicReference<MessageConsumer> consumerRef = new AtomicReference<>();
         return createCommandConsumer(
@@ -671,7 +677,7 @@ public abstract class AbstractVertxBasedMqttProtocolAdapter<T extends ProtocolAd
                     Tags.COMPONENT.set(commandContext.getCurrentSpan(), getTypeName());
                     final Command command = commandContext.getCommand();
                     if (command.isValid()) {
-                        onCommandReceived(mqttEndpoint, sub, commandContext);
+                        onCommandReceived(mqttEndpoint, qos, sub, commandContext);
                     } else {
                         commandContext.reject(new ErrorCondition(Constants.AMQP_BAD_REQUEST, "malformed command message"));
                         // issue credit so that application(s) can send the next command
@@ -1188,6 +1194,7 @@ public abstract class AbstractVertxBasedMqttProtocolAdapter<T extends ProtocolAd
      */
     protected final void onCommandReceived(
             final MqttEndpoint endpoint,
+            final MqttQoS qos,
             final CommandSubscription subscription,
             final CommandContext commandContext) {
 
@@ -1195,8 +1202,6 @@ public abstract class AbstractVertxBasedMqttProtocolAdapter<T extends ProtocolAd
         Objects.requireNonNull(subscription);
         Objects.requireNonNull(commandContext);
 
-        // we always publish the message using QoS 0
-        final MqttQoS qos = MqttQoS.AT_MOST_ONCE;
         String tenantId = subscription.getTenant();
         String deviceId = subscription.getDeviceId();
         if (subscription.isAuthenticated()) {
@@ -1209,24 +1214,34 @@ public abstract class AbstractVertxBasedMqttProtocolAdapter<T extends ProtocolAd
         // example: control/DEFAULT_TENANT/4711/req/xyz/light
         final String topic = String.format("%s/%s/%s/%s/%s/%s", subscription.getEndpoint(), tenantId, deviceId,
                 subscription.getRequestPart(), command.getRequestId(), command.getName());
+        LOG.debug("Publishing command to device [tenant-id: {}, device-id: {}, MQTT client-id: {}, QoS: {}]",
+                subscription.getTenant(), subscription.getDeviceId(), endpoint.clientIdentifier(), qos);
         endpoint.publish(topic, command.getPayload(), qos, false, false);
+        endpoint.publishAcknowledgeHandler(
+                messageId -> afterCommandPublished(endpoint, qos, subscription, topic, commandContext));
+        if (MqttQoS.AT_MOST_ONCE.equals(qos)) {
+            afterCommandPublished(endpoint, qos, subscription, topic, commandContext);
+        }
+    }
+
+    private static void addRetainAnnotation(final MqttContext context, final Message downstreamMessage, final Span currentSpan) {
+        if (context.message().isRetain()) {
+            currentSpan.log("device wants to retain message");
+            MessageHelper.addAnnotation(downstreamMessage, MessageHelper.ANNOTATION_X_OPT_RETAIN, Boolean.TRUE);
+        }
+    }
+
+    private void afterCommandPublished(final MqttEndpoint endpoint, final MqttQoS qos,
+            final CommandSubscription subscription, final String topic, final CommandContext commandContext) {
         metrics.incrementCommandDeliveredToDevice(subscription.getTenant());
         commandContext.accept();
         commandContext.flow(1);
-        LOG.trace("command published to device [tenant-id: {}, device-id: {}, MQTT client-id: {}]",
-                subscription.getTenant(), subscription.getDeviceId(), endpoint.clientIdentifier());
+        LOG.debug("command published to device [tenant-id: {}, device-id: {}, MQTT client-id: {}, QoS: {}]",
+                subscription.getTenant(), subscription.getDeviceId(), endpoint.clientIdentifier(), qos);
         final Map<String, String> items = new HashMap<>(3);
         items.put(Fields.EVENT, "command published to device");
         items.put(Tags.MESSAGE_BUS_DESTINATION.getKey(), topic);
         items.put(TracingHelper.TAG_QOS.getKey(), qos.toString());
         commandContext.getCurrentSpan().log(items);
-    }
-
-    private static void addRetainAnnotation(final MqttContext context, final Message downstreamMessage, final Span currentSpan) {
-
-        if (context.message().isRetain()) {
-            currentSpan.log("device wants to retain message");
-            MessageHelper.addAnnotation(downstreamMessage, MessageHelper.ANNOTATION_X_OPT_RETAIN, Boolean.TRUE);
-        }
     }
 }
