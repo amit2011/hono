@@ -64,6 +64,9 @@ import io.vertx.core.net.SelfSignedCertificate;
 import io.vertx.ext.unit.Async;
 import io.vertx.ext.unit.TestContext;
 
+import static org.hamcrest.core.Is.is;
+import static org.junit.Assert.*;
+
 /**
  * Base class for HTTP adapter integration tests.
  *
@@ -163,7 +166,6 @@ public abstract class HttpTestBase {
      */
     @Before
     public void setUp() {
-
         logger.info("running {}", testName.getMethodName());
         logger.info("using HTTP adapter [host: {}, http port: {}, https port: {}]",
                 IntegrationTestSupport.HTTP_HOST,
@@ -894,6 +896,109 @@ public abstract class HttpTestBase {
                                         response -> response.statusCode() == HttpURLConnection.HTTP_ACCEPTED);
                             });
                 });
+    }
+
+
+    /**
+     * Verifies that the queueDrainHandler is invoked on available of credit and a command is sent.
+     *
+     * @param ctx The test context.
+     * @throws InterruptedException if the test fails.
+     */
+    @Test
+    public void testQueueDrainHandler(final TestContext ctx) throws InterruptedException {
+
+        final Async setup = ctx.async();
+        final MultiMap requestHeaders = MultiMap.caseInsensitiveMultiMap()
+                .add(HttpHeaders.CONTENT_TYPE, "text/plain")
+                .add(HttpHeaders.AUTHORIZATION, authorization)
+                .add(HttpHeaders.ORIGIN, ORIGIN_URI)
+                .add(Constants.HEADER_TIME_TIL_DISCONNECT, "2");
+
+        final MultiMap cmdResponseRequestHeaders = MultiMap.caseInsensitiveMultiMap()
+                .add(HttpHeaders.CONTENT_TYPE, "text/plain")
+                .add(HttpHeaders.AUTHORIZATION, authorization)
+                .add(HttpHeaders.ORIGIN, ORIGIN_URI)
+                .add(Constants.HEADER_COMMAND_RESPONSE_STATUS, "200");
+
+        final TenantObject tenant = TenantObject.from(tenantId, true);
+        helper.registry.addDeviceForTenant(tenant, deviceId, PWD)
+                .setHandler(ctx.asyncAssertSuccess(ok -> setup.complete()));
+        setup.await();
+
+        final Async commandClientSetup = ctx.async();
+        logger.debug("Getting commandclient for tenant:{}, deviceId:{}", tenantId, deviceId);
+        helper.getCommandClient(tenantId, deviceId, 2000)
+                .compose(commandClient -> {
+                    logger.debug("Available Credit: {}", commandClient.getCredit());
+                    assertThat(commandClient.getCredit(), is(0));
+                    commandClient.sendQueueDrainHandler(sendCommandHandler -> {
+                        // Sends a command once the command client is replenished with credits.
+                        final JsonObject inputData = new JsonObject().put(COMMAND_JSON_KEY,
+                                (int) (Math.random() * 100));
+                        commandClient
+                                .sendCommand(COMMAND_TO_SEND, "application/json", Buffer.buffer(inputData.toString()),
+                                        null)
+                                .map(responsePayload -> {
+                                    logger.info(
+                                            "successfully sent command [name: {}, payload: {}] and received response [payload: {}]",
+                                            COMMAND_TO_SEND, Buffer.buffer(inputData.toString()), responsePayload);
+                                    commandClient.close(v -> {
+                                    });
+                                    return responsePayload;
+                                }).recover(t -> {
+                                    logger.warn("could not send command or did not receive a response: {}",
+                                            t.getMessage());
+                                    commandClient.close(v -> {
+                                    });
+                                    return Future.failedFuture(t);
+                                }).setHandler(ctx.asyncAssertSuccess(response -> {
+                                    ctx.assertEquals("text/plain", response.getContentType());
+                                    ctx.assertEquals("ok", response.getPayload().toString());
+                                }));
+                    });
+                    return Future.succeededFuture();
+                }).setHandler(ctx.asyncAssertSuccess(ok -> commandClientSetup.complete()));
+        commandClientSetup.await();
+
+        testUploadMessages(ctx, tenantId, msg -> {
+            final Integer ttd = MessageHelper.getTimeUntilDisconnect(msg);
+            logger.trace("piggy backed message received: {}, ttd = {}", msg, ttd);
+            final Optional<TimeUntilDisconnectNotification> notificationOpt = TimeUntilDisconnectNotification
+                    .fromMessage(msg);
+            ctx.assertTrue(notificationOpt.isPresent());
+            final TimeUntilDisconnectNotification notification = notificationOpt.get();
+            ctx.assertEquals(tenantId, notification.getTenantId());
+            ctx.assertEquals(deviceId, notification.getDeviceId());
+        }, count -> httpClient.create(
+                getEndpointUri(),
+                Buffer.buffer("hello " + count),
+                requestHeaders,
+                response -> response.statusCode() == HttpURLConnection.HTTP_OK)
+                .map(responseHeaders -> {
+                    // assert that the response contains a command
+                    logger.trace("Sent hono-ttd command request");
+                    logger.trace("comamand: {}, contentType:{}, requestId: {}, contentLenght: {}",
+                            responseHeaders.get(Constants.HEADER_COMMAND),
+                            responseHeaders.get(HttpHeaders.CONTENT_TYPE),
+                            responseHeaders.get(Constants.HEADER_COMMAND_REQUEST_ID),
+                            responseHeaders.get(HttpHeaders.CONTENT_LENGTH));
+                    ctx.assertEquals(COMMAND_TO_SEND, responseHeaders.get(Constants.HEADER_COMMAND));
+                    ctx.assertEquals("application/json", responseHeaders.get(HttpHeaders.CONTENT_TYPE));
+                    final String requestId = responseHeaders.get(Constants.HEADER_COMMAND_REQUEST_ID);
+                    ctx.assertNotNull(requestId);
+                    ctx.assertNotEquals(responseHeaders.get(HttpHeaders.CONTENT_LENGTH), "0");
+                    return requestId;
+                }).compose(receivedCommandRequestId -> {
+                    // send a response to the command now
+                    final String responseUri = getCommandResponseUri(receivedCommandRequestId);
+                    logger.trace("posting response to command [uri: {}]", responseUri);
+                    return httpClient.create(
+                            responseUri,
+                            Buffer.buffer("ok"),
+                            cmdResponseRequestHeaders,
+                            response -> response.statusCode() == HttpURLConnection.HTTP_ACCEPTED);
+                }), 1);
     }
 
     private static String getCommandResponseUri(final String commandRequestId) {

@@ -49,7 +49,7 @@ public class CommandClientImpl extends AbstractRequestResponseClient<BufferResul
      * <p>
      * The client will be ready to use after invoking {@link #createLinks(ProtonConnection)} or
      * {@link #createLinks(ProtonConnection, Handler, Handler)} only.
-     * 
+     *
      * @param context The vert.x context to run message exchanges with the peer on.
      * @param config The configuration properties to use.
      * @param tenantId The tenant that the device belongs to.
@@ -69,7 +69,7 @@ public class CommandClientImpl extends AbstractRequestResponseClient<BufferResul
 
     /**
      * Creates a request-response client.
-     * 
+     *
      * @param context The vert.x context to run message exchanges with the peer on.
      * @param config The configuration properties to use.
      * @param tenantId The tenant that the device belongs to.
@@ -105,7 +105,7 @@ public class CommandClientImpl extends AbstractRequestResponseClient<BufferResul
      * exchanged with the device.
      * <p>
      * This methods creates message IDs based on a counter that is increased on each invocation.
-     * 
+     *
      * @return The message ID.
      */
     @Override
@@ -161,7 +161,7 @@ public class CommandClientImpl extends AbstractRequestResponseClient<BufferResul
      * address is set to <em>control/${tenantId}/${deviceId}/${replyId}</em>.
      * This address is also used as the value of the <em>reply-to</em>
      * property of all command request messages sent by this client.
-     * 
+     *
      * @param context The vert.x context to run all interactions with the server on.
      * @param clientConfig The configuration properties to use.
      * @param con The AMQP connection to the server.
