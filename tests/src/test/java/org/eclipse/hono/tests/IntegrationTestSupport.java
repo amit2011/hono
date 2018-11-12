@@ -29,6 +29,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.eclipse.hono.client.CommandClient;
 import org.eclipse.hono.client.ServiceInvocationException;
 import org.eclipse.hono.config.ClientConfigProperties;
 import org.eclipse.hono.util.BufferResult;
@@ -324,10 +325,7 @@ public final class IntegrationTestSupport {
             final Map<String, Object> properties,
             final long requestTimeout) {
 
-        return honoClient.getOrCreateCommandClient(tenantId, deviceId).compose(commandClient -> {
-
-            commandClient.setRequestTimeout(requestTimeout);
-
+        return getCommandClient(tenantId, deviceId, requestTimeout).compose(commandClient -> {
             // send the command upstream to the device
             LOGGER.trace("sending command [name: {}, contentType: {}, payload: {}]", command, contentType, payload);
             return commandClient.sendCommand(command, contentType, payload, properties).map(responsePayload -> {
@@ -341,6 +339,23 @@ public final class IntegrationTestSupport {
                 return Future.failedFuture(t);
             });
         });
+    }
+
+    /**
+     * Returns a command client for a device.
+     *
+     * @param tenantId The tenant that the device belongs to.
+     * @param deviceId The identifier of the device.
+     * @param requestTimeout The number of milliseconds to wait for a response from the device.
+     * @return A future that may contain a command client.
+     */
+    public Future<CommandClient> getCommandClient(final String tenantId, final String deviceId,
+            final long requestTimeout) {
+        return honoClient.getOrCreateCommandClient(tenantId, deviceId)
+                .map(commandClient -> {
+                    commandClient.setRequestTimeout(requestTimeout);
+                    return commandClient;
+                });
     }
 
     /**
