@@ -21,7 +21,7 @@ All services are exposed via the same ports as used in the guide.
   When using the [Hono client]({{< relref "/admin-guide/hono-client-configuration.md" >}}) to access the sandbox' Telemetry and/or Event APIs, make sure to not set a trust store explicitly but instead set the *tlsEnabled* property to `true`. The example below can be used to consume telemetry messages from the sandbox:
 
     ```
-    $> java -jar target/hono-example-0.6-exec.jar --hono.client.host=hono.eclipse.org --hono.client.port=15671 --hono.client.tlsEnabled=true --hono.client.username=consumer@HONO --hono.client.password=verysecret --spring.profiles.active=receiver
+    $> java -jar hono-cli-0.8-exec.jar --hono.client.host=hono.eclipse.org --hono.client.port=15671 --hono.client.tlsEnabled=true --hono.client.username=consumer@HONO --hono.client.password=verysecret --spring.profiles.active=receiver
     ```
   Note that  only the *receiver* profile is activated but not the *ssl* profile.
 * In order to minimize the risk of collisions of device identities and credentials and to reduce the risk of others *guessing* your identifiers, you are advised to use **non-trivial, hard-to-guess** tenant and device identifiers (e.g. a UUID).
